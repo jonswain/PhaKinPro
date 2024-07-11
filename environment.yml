@@ -1,0 +1,10 @@
+name: PhaKinPro
+dependencies:
+  - numpy=1.24
+  - matplotlib
+  - rdkit=2022.09.4
+  - scipy
+  - tqdm
+  - scikit-learn=1.2.2
+  - pandas<2.0.0
+  - python=3.10

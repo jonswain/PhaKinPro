@@ -1,6 +1,0 @@
-numpy
-matplotlib
-rdkit
-scipy
-tqdm
-scikit-learn
