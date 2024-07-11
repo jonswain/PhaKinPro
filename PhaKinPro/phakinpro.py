@@ -1,144 +1,63 @@
+"""PhaKinPro main functionality"""
+
 import _pickle as cPickle
+import argparse
 import bz2
 import glob
 import gzip
 import io
 import os
-import warnings
+from io import StringIO
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import rdkit
+from config import AD_DICT, CLASSIFICATION_DICT, MODEL_DICT, MODEL_DICT_INVERT
 from rdkit import Chem, DataStructs
-from rdkit.Chem import AllChem
+from rdkit.Chem import AllChem, MolFromSmiles
 from rdkit.Chem.Draw import SimilarityMaps
 from scipy.spatial.distance import cdist
+from sklearn.base import BaseEstimator
+from tqdm import tqdm
 
 
-def warn(*args, **kwargs):
-    pass
+def run_prediction(
+    model: BaseEstimator,
+    model_data: dict,
+    fingerprints: pd.DataFrame,
+    calculate_ad: bool = True,
+) -> tuple[list, np.array, list | None]:
+    """Makes prediction using a model and the fingerprints.
 
+    Args:
+        model (BaseEstimator): The model to use for prediction.
+        model_data (dict): The data used to train the model.
+        fingerprints (pd.DataFrame): Fingerprints to predict on
+        calculate_ad (bool, optional): Calculate applicability domain. Defaults to True.
 
-warnings.warn = warn
+    Returns:
+        tuple[list, np.array, list | None]: Predictions, probabilities, and inside AD.
+    """
+    pred_proba = model.predict_proba(fingerprints)[:, 1]
+    preds = [1 if prob > 0.5 else 0 for prob in pred_proba]
 
-MODEL_DICT = {
-    "Hepatic Stability": [
-        "Dataset_01B_hepatic-stability_15min_imbalanced-morgan_RF.pgz",
-        "Dataset_01C_hepatic-stability_30min_imbalanced-morgan_RF.pgz",
-        "Dataset_01D_hepatic-stability_60min_imbalanced-morgan_RF.pgz",
-    ],
-    "Microsomal Half-life Sub-cellular": [
-        "Dataset_02A_microsomal-half-life-subcellular_imbalanced-morgan_RF.pgz"
-    ],
-    "Microsomal Half-life Tissue": [
-        "Dataset_02B_microsomal-half-life_30-min_binary_unbalanced_morgan_RF.pgz"
-    ],
-    "Renal Clearance": [
-        "dataset_03_renal-clearance_0.1-threshold_balanced-morgan_RF.pgz",
-        "dataset_03_renal-clearance_0.5-threshold_imbalanced-morgan_RF.pgz",
-        "dataset_03_renal-clearance_1.0-threshold_balanced-morgan_RF.pgz",
-    ],
-    "BBB Permeability": ["dataset_04_bbb-permeability_balanced-morgan_RF.pgz"],
-    "CNS Activity": ["dataset_04_cns-activity_1464-compounds_imbalanced-morgan_RF.pgz"],
-    "CACO2": ["Dataset_05A_CACO2_binary_unbalanced_morgan_RF.pgz"],
-    "Plasma Protein Binding": [
-        "Dataset_06_plasma-protein-binding_binary_unbalanced_morgan_RF.pgz"
-    ],
-    "Plasma Half-life": [
-        "Dataset_08_plasma_half_life_12_hr_balanced-morgan_RF.pgz",
-        "Dataset_08_plasma_half_life_1_hr_balanced-morgan_RF.pgz",
-        "Dataset_08_plasma_half_life_6_hr_imbalanced-morgan_RF.pgz",
-    ],
-    "Microsomal Intrinsic Clearance": [
-        "Dataset_09_microsomal-intrinsic-clearance_12uL-min-mg-threshold-imbalanced-morgan_RF.pgz"
-    ],
-    "Oral Bioavailability": [
-        "dataset_10_oral_bioavailability_0.5_threshold_imbalanced-morgan_RF.pgz",
-        "dataset_10_oral_bioavailability_0.8_balanced-morgan_RF.pgz",
-    ],
-}
+    for idx, pred in enumerate(preds):
+        if pred == 0:
+            pred_proba[idx] = 1 - pred_proba[idx]
 
-# This is to seaerch the keys of the dict for the model paths and return the model name.
-MODEL_DICT_INVERT = {v: key for key, val in MODEL_DICT.items() for v in val}
-
-CLASSIFICATION_DICT = {
-    "Hepatic Stability": {
-        1: "Hepatic stability <= 50% at 15 minutes",
-        2: "Hepatic stability <= 50% between 15 and 30 minutes",
-        3: "Hepatic stability <= 50% between 30 and 60 minutes",
-        4: "Hepatic stability > 50% at 60 minutes",
-    },
-    "Microsomal Half-life Sub-cellular": {
-        0: "Sub-cellular Hepatic Half-life > 30 minutes",
-        1: "Sub-cellular Hepatic Half-life <= 30 minutes",
-    },
-    "Microsomal Half-life Tissue": {
-        0: "Tissue Hepatic Half-life > 30 minutes",
-        1: "Tissue Hepatic Half-life <= 30 minutes",
-    },
-    "Renal Clearance": {
-        1: "Renal clearance below 0.10 ml/min/kg",
-        2: "Renal clearance between 0.10 and 0.50 ml/min/kg",
-        3: "Renal clearance between 0.50 and 1.00 ml/min/kg",
-        4: "Renal clearance above 1.00 ml/min/kg",
-    },
-    "BBB Permeability": {
-        0: "Does not permeate blood brain barrier",
-        1: "Does permeate blood brain barrier",
-    },
-    "CNS Activity": {
-        0: "Does not exhibit central nervous system activity",
-        1: "Does exhibit central nervous system activity",
-    },
-    "CACO2": {0: "Does not permeate Caco-2", 1: "Does permeate Caco-2"},
-    "Plasma Protein Binding": {
-        0: "Plasma protein binder",
-        1: "Weak/non plasma protein binder",
-    },
-    "Plasma Half-life": {
-        1: "Half-life below 1 hour",
-        2: "Half-life between 1 and 6 hours",
-        3: "Half-life between 6 and 12 hours",
-        4: "Half-life above 12 hours",
-    },
-    "Microsomal Intrinsic Clearance": {
-        0: "Microsomal intrinsic clearance < 12 uL/min/mg",
-        1: "Microsomal intrinsic clearance >= 12 uL/min/mg",
-    },
-    "Oral Bioavailability": {
-        1: "Less than 0.5 F",
-        2: "Between 0.5 and 0.8 F",
-        3: "Above 0.8 F",
-    },
-}
-
-
-AD_DICT = {True: "Inside", False: "Outside"}
-
-
-# TODO: Make this function accept all fingerprints and make predictions at once
-def run_prediction(model, model_data, smiles, calculate_ad=True):
-    fp = np.zeros((2048, 1))
-    _fp = AllChem.GetMorganFingerprintAsBitVect(
-        Chem.MolFromSmiles(smiles), radius=3, nBits=2048
-    )
-    DataStructs.ConvertToNumpyArray(_fp, fp)
-
-    pred_proba = model.predict_proba(fp.reshape(1, -1))[:, 1]
-    pred = 1 if pred_proba > 0.5 else 0
-
-    # TODO: Why invert zero values?
-    if pred == 0:
-        pred_proba = 1 - pred_proba
-
-    # TODO: Work out what this is?
     if calculate_ad:
-        ad = model_data["D_cutoff"] > np.min(
-            cdist(model_data["Descriptors"].to_numpy(), fp.reshape(1, -1))
-        )
-        return pred, pred_proba, ad
-    return pred, pred_proba, None
+        ads = []
+        for idx, row in fingerprints.iterrows():
+            ad = model_data["D_cutoff"] > np.min(
+                cdist(
+                    model_data["Descriptors"].to_numpy(), np.array(row).reshape(1, -1)
+                )
+            )
+            ads.append(ad)
+        return preds, pred_proba, ads
+    return preds, pred_proba, None
 
 
 # TODO: Make this function accept all fingerprints and make predictions at once
@@ -162,8 +81,7 @@ def get_prob_map(model, smiles):
     return imgdata.getvalue()
 
 
-# TODO: Work out what this is?
-def multiclass_ranking(ordered_preds):
+def multiclass_ranking(ordered_preds: list) -> int:
     idx = 0
     one_detected = False
     for i, o in enumerate(ordered_preds):
@@ -178,15 +96,21 @@ def multiclass_ranking(ordered_preds):
     return idx if idx != 0 else len(ordered_preds) + 1
 
 
-def main(smiles, calculate_ad=True, make_prop_img=False, **kwargs):
+def get_prediction_data(
+    fingerprints: pd.DataFrame,
+    calculate_ad: bool = True,
+    make_prop_img: bool = False,
+    **kwargs,
+) -> list:
 
-    # This checks if the found models are in the directory above
+    # This checks if the found models are in the directory
     def default(key, d):
         if key in d.keys():
             return d[key]
         else:
             return False
 
+    # Find all models
     models = sorted(
         [
             f
@@ -198,6 +122,7 @@ def main(smiles, calculate_ad=True, make_prop_img=False, **kwargs):
         ],
         key=lambda x: x.split("_")[1],
     )
+    # Find all data
     models_data = sorted(
         [
             f
@@ -210,9 +135,11 @@ def main(smiles, calculate_ad=True, make_prop_img=False, **kwargs):
         key=lambda x: x.split("_")[1],
     )
 
-    values = {}
+    values: dict = {}
 
-    for model_endpoint, model_data in zip(models, models_data):
+    for model_endpoint, model_data in tqdm(
+        zip(models, models_data), total=min(len(models), len(models_data))
+    ):
         if not default(MODEL_DICT_INVERT[os.path.basename(model_endpoint)], MODEL_DICT):
             continue
         with gzip.open(model_endpoint, "rb") as f:
@@ -221,103 +148,113 @@ def main(smiles, calculate_ad=True, make_prop_img=False, **kwargs):
         with bz2.BZ2File(model_data, "rb") as f:
             model_data = cPickle.load(f)
 
-        pred, pred_proba, ad = run_prediction(
-            model, model_data, smiles, calculate_ad=calculate_ad
+        preds, pred_probas, ads = run_prediction(
+            model, model_data, fingerprints, calculate_ad=calculate_ad
         )
 
-        svg_str = ""
-        if make_prop_img:
-            svg_str = get_prob_map(model, smiles)
+        if ads is None:
+            ads = [None] * len(preds)
 
-        if ad is not None:
-            ad_value = AD_DICT[ad]
-        else:
-            ad_value = None
+        # TODO: Make this work with fingerprints
+        svg_str = ""
+        # if make_prop_img:
+        #     svg_str = get_prob_map(model, smiles
 
         values.setdefault(
             MODEL_DICT_INVERT[os.path.basename(model_endpoint)], []
         ).append(
-            [
-                int(pred),
-                str(round(float(pred_proba) * 100, 2)) + "%",
-                ad_value,
-                svg_str,
-            ]
+            {
+                "preds": preds,
+                "probability": [
+                    str(round(float(pred_proba) * 100, 2)) + "%"
+                    for pred_proba in pred_probas
+                ],
+                "inside_ad": ads,
+                "svg_str": svg_str,
+            }
         )
 
     processed_results = []
-    for key, val in values.items():
-        if key in [
-            "Hepatic Stability",
-            "Renal Clearance",
-            "Plasma Half-life",
-            "Oral Bioavailability",
-        ]:
-            new_pred = multiclass_ranking([_[0] for _ in val])
-            if new_pred == 0:
-                processed_results.append(
-                    [
-                        key,
-                        "Inconsistent result: no prediction",
-                        "Very unconfident",
-                        "NA",
-                        "",
-                    ]
-                )
-            else:
-                # this is because of how the hierarchical model works
-                if new_pred in [1, 2]:
-                    p = 0
+
+    for idx, smiles in enumerate(fingerprints.index):
+        processed_result = []
+        for key, value in values.items():
+            if key in [
+                "Hepatic Stability",
+                "Renal Clearance",
+                "Plasma Half-life",
+                "Oral Bioavailability",
+            ]:
+                val = []
+                for model in value:
+                    val.append(
+                        [
+                            model["preds"][idx],
+                            model["probability"][idx],
+                            model["inside_ad"][idx],
+                            model["svg_str"],
+                        ]
+                    )
+
+                new_pred = multiclass_ranking([_[0] for _ in val])
+                if new_pred == 0:
+                    processed_result.append(
+                        [
+                            key,
+                            "Inconsistent result: no prediction",
+                            "Very unconfident",
+                            "NA",
+                            "",
+                        ]
+                    )
                 else:
-                    p = new_pred - 2
-                processed_results.append(
+                    # this is because of how the hierarchical model works
+                    if new_pred in [1, 2]:
+                        p = 0
+                    else:
+                        p = new_pred - 2
+                    processed_result.append(
+                        [
+                            key,
+                            CLASSIFICATION_DICT[key][new_pred],
+                            val[p][1],
+                            val[p][2],
+                            val[p][3],
+                        ]
+                    )
+            else:
+                processed_result.append(
                     [
                         key,
-                        CLASSIFICATION_DICT[key][new_pred],
-                        val[p][1],
-                        val[p][2],
-                        val[p][3],
+                        CLASSIFICATION_DICT[key][val[0][0]],
+                        val[0][1],
+                        val[0][2],
+                        val[0][3],
                     ]
                 )
-        else:
-            processed_results.append(
-                [
-                    key,
-                    CLASSIFICATION_DICT[key][val[0][0]],
-                    val[0][1],
-                    val[0][2],
-                    val[0][3],
-                ]
-            )
+
+        processed_results.append((smiles, processed_result))
 
     return processed_results
 
 
-def write_csv_file(smiles_list, calculate_ad=False):
-    headers = []
+def create_results_frame(fingerprints, calculate_ad=False) -> pd.DataFrame:
+    # Create columns for results
+    columns = []
     for _key in MODEL_DICT.keys():
-        headers.append(_key)
-        headers.append(_key + "_proba")
+        columns.append(_key)
+        columns.append(_key + "_proba")
         if calculate_ad:
-            headers.append(_key + "_AD")
+            columns.append(_key + "_AD")
 
-    string_file = StringIO()
-    writer = csv.DictWriter(string_file, fieldnames=["SMILES", *headers])
-    writer.writeheader()
+    # Get results
+    results = get_prediction_data(fingerprints, calculate_ad=calculate_ad, **MODEL_DICT)
 
-    for smiles in tqdm(smiles_list):
-        molecule = MolFromSmiles(smiles)
-
-        row = {"SMILES": smiles}
-
-        if molecule is None:
-            row["SMILES"] = f"(invalid){smiles}"
-            writer.writerow(row)
-            continue
-
-        data = main(smiles, calculate_ad=calculate_ad, **MODEL_DICT)
-
+    final_table = []
+    for smiles, data in results:
+        cols = {}
         for model_name, pred, pred_proba, ad, _ in data:
+            row = {}
             try:
                 pred_proba = float(pred_proba[:-1]) / 100  # covert back to 0-1 float
                 row[model_name] = pred
@@ -329,19 +266,33 @@ def write_csv_file(smiles_list, calculate_ad=False):
             if calculate_ad:
                 row[model_name + "_AD"] = ad
 
-        writer.writerow(row)
+            cols.update(row)
+        final_table.append({smiles: cols})
 
-    return string_file.getvalue()
+    rows = [pd.DataFrame.from_dict(row, orient="index") for row in final_table]
+    return pd.concat(rows)
 
 
-if __name__ == "__main__":
-    import argparse
-    import csv
-    from io import StringIO
+def create_fingerprints(mols_list: list[rdkit.Chem.rdchem.Mol | None]) -> pd.DataFrame:
+    """Create Morgan fingerprints for a list of SMILES strings.
 
-    from rdkit.Chem import MolFromSmiles
-    from tqdm import tqdm
+    Args:
+        mols_list (list[rdkit.Chem.rdchem.Mol | None]): List of RDKit molecules.
 
+    Returns:
+        pd.DataFrame: DataFrame of fingerprints.
+    """
+    fps = []
+    for mol in tqdm(mols_list):
+        fp = np.zeros((2048, 1))
+        _fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=3, nBits=2048)
+        DataStructs.ConvertToNumpyArray(_fp, fp)
+        fps.append(fp.astype(int))
+    return pd.DataFrame(fps, columns=[f"Bit_{i}" for i in range(2048)])
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--infile", type=str, required=True, help="location to csv of SMILES"
@@ -364,24 +315,62 @@ if __name__ == "__main__":
         help="column name containing compound identifiers",
     ),
     parser.add_argument("--ad", action="store_true", help="calculate the AD")
+    return parser.parse_args()
 
-    args = parser.parse_args()
 
-    # Check if the input file exists
-    if not os.path.exists(args.infile):
+def main(args: argparse.Namespace) -> None:
+    """Main function to run PhaKinPro predictions."""
+    # Validate input file
+    if not Path(args.infile).exists():
         raise FileNotFoundError(f"Input file {args.infile} not found.")
-
-    # Check smiles_col in DataFrame
-    input_df = pd.read_csv(args.infile).head(2)
+    input_df = pd.read_csv(Path(args.infile))
     if args.smiles_col not in input_df.columns:
         raise ValueError(f"Column {args.smiles_col} not found in {args.infile}")
-    smiles = input_df[args.smiles_col].tolist()
-    identifiers = input_df[args.id_col].tolist()
+    if args.id_col not in input_df.columns:
+        raise ValueError(f"Column {args.smiles_col} not found in {args.infile}")
 
-    print("Making predictions...")
-    predictions = write_csv_file(smiles)
-    prediction_df = pd.read_csv(StringIO(predictions))
+    # Get SMILES and identifiers from CSV input
+    smiles = input_df[args.smiles_col]
+    identifiers = input_df[args.id_col]
+
+    # Create predictions dataframe
+    prediction_df = pd.DataFrame({"smiles": smiles})
     if args.id_col:
         prediction_df[args.id_col] = identifiers
+    print("Checking input SMILES...")
+    prediction_df["mols"] = [MolFromSmiles(s) for s in smiles]
+    invalid_smiles = prediction_df[prediction_df["mols"].isnull()]
+    if len(invalid_smiles) > 0:
+        print(f"Invalid SMILES at indices: {invalid_smiles.index.to_list()}")
+        # Rename invalid SMILES f"(invalid){x}"
+        prediction_df.loc[invalid_smiles.index, "smiles"] = (
+            "(invalid) " + prediction_df.loc[invalid_smiles.index, "smiles"]
+        )
 
-    prediction_df.to_csv(args.outfile, index=False)
+    # Create fingerprints
+    print("Creating fingerprints...")
+    fingerprints = create_fingerprints(
+        prediction_df[prediction_df["mols"].notnull()]["mols"]
+    )
+    fingerprints.index = prediction_df[prediction_df["mols"].notnull()]["smiles"]
+
+    # Make predictions
+    print("Making predictions...")
+    predictions = create_results_frame(fingerprints)
+    predictions.index.name = "smiles"
+
+    # Merge predictions with input data, tidy, and save
+    merged_df = prediction_df.merge(
+        predictions.reset_index(), left_on="smiles", right_on="smiles", how="left"
+    )
+
+    merged_df.rename(
+        columns={"smiles": args.smiles_col, "identifier": args.id_col}, inplace=True
+    )
+    merged_df.drop("mols", axis=1).to_csv(Path(args.outfile), index=False)
+    print("Finished! Results saved to:", args.outfile)
+
+
+if __name__ == "__main__":
+    args = parse_arguments()
+    main(args)
