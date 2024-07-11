@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from rdkit import Chem, DataStructs
-from rdkit.Chem import AllChem, rdFingerprintGenerator
+from rdkit.Chem import AllChem
 from rdkit.Chem.Draw import SimilarityMaps
 from scipy.spatial.distance import cdist
 
@@ -358,6 +358,11 @@ if __name__ == "__main__":
         default="SMILES",
         help="column name containing SMILES of interest",
     ),
+    parser.add_argument(
+        "--id_col",
+        type=str,
+        help="column name containing compound identifiers",
+    ),
     parser.add_argument("--ad", action="store_true", help="calculate the AD")
 
     args = parser.parse_args()
@@ -367,13 +372,16 @@ if __name__ == "__main__":
         raise FileNotFoundError(f"Input file {args.infile} not found.")
 
     # Check smiles_col in DataFrame
-    prediction_df = pd.read_csv(args.infile)
-    if args.smiles_col not in prediction_df.columns:
+    input_df = pd.read_csv(args.infile).head(2)
+    if args.smiles_col not in input_df.columns:
         raise ValueError(f"Column {args.smiles_col} not found in {args.infile}")
-    smiles = pd.read_csv(args.infile)[args.smiles_col].tolist()
+    smiles = input_df[args.smiles_col].tolist()
+    identifiers = input_df[args.id_col].tolist()
 
     print("Making predictions...")
     predictions = write_csv_file(smiles)
+    prediction_df = pd.read_csv(StringIO(predictions))
+    if args.id_col:
+        prediction_df[args.id_col] = identifiers
 
-    with open(args.outfile, "w") as f:
-        f.write(predictions)
+    prediction_df.to_csv(args.outfile, index=False)
