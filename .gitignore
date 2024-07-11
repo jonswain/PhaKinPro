@@ -1,3 +1,6 @@
 .vscode
 __pycache__
 .prettierrc
+*.csv
+*.ipynb
+.DS_Store
