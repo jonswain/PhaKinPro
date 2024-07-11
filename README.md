@@ -17,14 +17,21 @@ conda env create -f environment.yml
 activate PhaKinPro
 ```
 
+## Example usage
+
 The packages necessary to run the project are now installed inside the conda environment.
 
-After downloading, `PhaKinPro/phakinpro.py` can be called from the command line with `python pharkinpro --help`
+After downloading, `PhaKinPro/phakinpro.py` can be called from the command line with `python phakinpro --help`
 
 `--infile` is required and is the fileloc for a csv of SMILES to predict properties for. Requires that csv has header and is comma seperated
 `--smiles_col` is the name of the column containing the SMILES strings of interest. Defaults to "SMILES"
+`--id_col` is the name of the column containing the compound identifiers. Defaults to "identifer"
 `--outfile` is the fileloc of where the output csv file should go. Defaults to `current-working-directory/phakin_output.csv`
 `--ad` flag to turn on applicability domain calculation for the models
+
+```bash
+python PhaKinPro/phakinpro.py --infile input.csv --smiles_col smiles --id_col indentifiers --outfile out.csv
+```
 
 ## Webserver interface
 
