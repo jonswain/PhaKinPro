@@ -5,6 +5,6 @@ dependencies:
   - rdkit=2022.09.4
   - scipy
   - tqdm
-  - scikit-learn=1.2.2
+  - scikit-learn=1.0.2
   - pandas<2.0.0
   - python=3.10
