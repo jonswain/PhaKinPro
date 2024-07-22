@@ -14,7 +14,7 @@ PHArmacoKINetic PROperty calculator: Used to predict varies pharmacokinetic prop
 git clone https://github.com/jonswain/PhaKinPro.git
 cd PhaKinPro
 conda env create -f environment.yml
-activate PhaKinPro
+conda activate PhaKinPro
 ```
 
 ## Example usage
